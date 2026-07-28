@@ -1,0 +1,45 @@
+[package]
+name = "vole-arc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rand = "0.8"
+vole-arc = { path = ".." }
+
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "presentation_verify"
+path = "fuzz_targets/presentation_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "issue_verify"
+path = "fuzz_targets/issue_verify.rs"
+test = false
+doc = false
+bench = false

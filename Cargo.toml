@@ -1,0 +1,67 @@
+[package]
+name = "vole-arc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Research prototype for scoped anonymous rate-limited credentials using VOLE-in-the-head and MAYO"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+binary-fields = { version = "=0.1.0", git = "https://github.com/SamuelSchlesinger/vole-act", rev = "e3734dd770923272a9026a6f31680f6aa805d142" }
+mayo = { version = "=0.1.0", git = "https://github.com/SamuelSchlesinger/vole-act", rev = "e3734dd770923272a9026a6f31680f6aa805d142" }
+rand_core = "0.6.4"
+sha3 = { version = "0.10", features = ["asm"] }
+subtle = "2.6"
+voleith = { version = "=0.1.0", git = "https://github.com/SamuelSchlesinger/vole-act", rev = "e3734dd770923272a9026a6f31680f6aa805d142", default-features = false }
+zeroize = "1.8"
+
+[features]
+default = ["parallel"]
+parallel = ["voleith/parallel"]
+
+[dev-dependencies]
+criterion = "0.5"
+rand = "0.8"
+
+[[bench]]
+name = "protocol"
+harness = false
+
+[[bench]]
+name = "side_channels"
+harness = false
+
+[lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_code = "forbid"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+lto = "thin"
+
+[profile.bench]
+debug = true
+
+# Keep the cryptographic hot paths usable in debug test runs.
+[profile.dev.package.sha3]
+opt-level = 3
+
+[profile.dev.package.binary-fields]
+opt-level = 3
+
+[profile.dev.package.voleith]
+opt-level = 3
+
+[profile.dev.package.mayo]
+opt-level = 3

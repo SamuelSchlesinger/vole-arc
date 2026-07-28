@@ -1,0 +1,9 @@
+msrv = "1.88.0"
+doc-valid-idents = [
+    "Fiat-Shamir",
+    "MAYO",
+    "Privacy Pass",
+    "SHAKE256",
+    "VOLE",
+    "VOLE-ARC",
+]

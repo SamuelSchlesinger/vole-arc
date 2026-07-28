@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install --yes shellcheck
+      - name: Check repository hygiene
+        run: scripts/check.sh hygiene
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+      - name: Lint, test, and document Rust code
+        run: scripts/check.sh rust
+
+  fuzz-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install nightly Rust
+        run: rustup toolchain install nightly-2026-06-01 --profile minimal --component clippy,rustfmt
+      - name: Install cargo-fuzz
+        run: cargo +nightly-2026-06-01 install cargo-fuzz --version 0.13.2 --locked
+      - name: Check fuzz targets
+        run: scripts/check.sh fuzz
+
+  paper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install document toolchain
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --yes
+          chktex
+          latexmk
+          poppler-utils
+          texlive-fonts-recommended
+          texlive-latex-extra
+          texlive-latex-recommended
+      - name: Lint and build the protocol paper
+        run: scripts/check.sh paper
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install Rust
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Install dependency-policy tools
+        run: >-
+          cargo +1.88.0 install cargo-deny --version 0.20.2 --locked &&
+          cargo +1.88.0 install cargo-audit --version 0.22.2 --locked
+      - name: Check dependency policy and advisories
+        run: scripts/check.sh supply-chain

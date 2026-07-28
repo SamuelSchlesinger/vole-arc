@@ -1,0 +1,569 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{tabularx}
+\usepackage{url}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!45!black,
+  citecolor=blue!45!black,
+  urlcolor=blue!45!black,
+  pdftitle={VOLE-ARC: Scoped Anonymous Rate-Limited Credentials},
+  pdfsubject={Protocol and implementation note}
+}
+
+\setlist[itemize,enumerate]{nosep,leftmargin=*}
+\setcounter{tocdepth}{1}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\raggedbottom
+
+\newcommand{\concat}{\,\|\,}
+\newcommand{\F}{\mathbb{F}_{16}}
+\newcommand{\LE}[1]{\operatorname{LE}_{#1}}
+\newcommand{\XOF}{\operatorname{SHAKE256}}
+\newcommand{\Prefix}{\operatorname{Prefix}}
+\newcommand{\pack}{\operatorname{pack16}}
+\newcommand{\PoK}{\operatorname{PoK}}
+\newcommand{\Store}{\ensuremath{\mathsf{Store}}}
+\newcommand{\domain}[1]{\texttt{#1}}
+
+\title{\textbf{VOLE-ARC: Scoped Anonymous Rate-Limited Credentials}}
+\author{Protocol and implementation note}
+\date{Implementation snapshot 0.1.0 -- 28 July 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+VOLE-ARC is an experimental anonymous credential with a separate presentation
+allowance for each public context. A client obtains one hidden credential,
+then proves possession while deriving a deterministic tag from a secret,
+context, and hidden counter. A verifier accepts at most one copy of each tag.
+The counter range therefore bounds accepted presentations per credential and
+context. The construction follows the scoped rate-limit pattern of the
+Privacy Pass ARC work, but replaces its P-256 credential and Schnorr proof
+with signer-salted MAYO authentication and a VOLE-in-the-head proof of the
+complete relation. This note specifies the implemented protocol, its state
+requirements, wire envelope, parameter limits, and security gaps. VOLE-ARC is
+a research prototype, not a production scheme or an interoperable Privacy
+Pass ciphersuite.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Scope and status}
+
+The Privacy Pass ARC drafts let one credential produce a fixed number of
+unlinkable tokens under an agreed presentation
+context~\cite{arc-crypto,arc-protocol}. VOLE-ARC keeps that structure:
+
+\begin{enumerate}
+  \item issue a hidden, long-lived credential;
+  \item derive a tag from a credential secret, a public presentation scope,
+        and a hidden nonce;
+  \item prove that the nonce is below a public limit; and
+  \item reject a tag that was accepted before.
+\end{enumerate}
+
+The cryptography and encoding are different. ARC(P-256) uses a
+keyed-verification credential, a group-element tag, and an integrated Schnorr
+range proof. VOLE-ARC uses a MAYO preimage as a publicly verifiable
+authenticator and proves the MAYO, SHAKE256, and range relations with
+VOLE-in-the-head~\cite{mayo-round2,vole-in-the-head}. Its tag is 32 bytes.
+Its local envelope starts with \domain{VARC}, not Privacy Pass token type
+\domain{0xE5AC}. It is not wire-compatible with ARC(P-256), and it does not
+specify an HTTP binding.
+
+This document describes the Rust implementation at the repository's initial
+snapshot. It is not a security proof. Section~\ref{sec:security} states the
+assumptions and unresolved proof obligations.
+
+\section{Protocol specification}
+
+\subsection{Notation and roles}
+
+Byte strings are concatenated with $\concat$. $\LE{w}(x)$ encodes integer
+$x$ as $w$ little-endian bytes. All lengths in transcript framing are
+unsigned 64-bit little-endian integers. $\XOF(x,n)$ denotes the first $n$
+bytes of SHAKE256 on $x$~\cite{fips-202}. For a domain string $d$, define
+\[
+  H_d(x_1,\ldots,x_r) =
+  \XOF\!\left(d \concat
+    \LE{8}(|x_1|) \concat x_1 \concat \cdots \concat
+    \LE{8}(|x_r|) \concat x_r, 32\right).
+\]
+Domain strings include the ASCII suffix \domain{/v1}. This suffix is part of
+the transcript, not prose versioning.
+
+The three roles are:
+
+\begin{itemize}
+  \item \textbf{Client.} Creates an issuance proof, retains the credential
+        secret and
+        counter map, and constructs presentations.
+  \item \textbf{Issuer.} Verifies issuance proofs and uses a MAYO trapdoor to
+        authenticate a client commitment.
+  \item \textbf{Verifier.} Reconstructs policy-selected public inputs,
+        verifies a
+        presentation proof, and atomically consumes its tag.
+\end{itemize}
+
+The verifier can be a relying party distinct from the issuer because
+presentation verification is public. The issuer public key must still be
+authenticated out of band.
+
+\subsection{Suites and keys}
+
+Let $P^*:\F^{kn}\rightarrow\F^m$ be the whipped MAYO public map. The issuer
+holds its trapdoor and publishes the expanded map, an application/key-epoch
+label $A$, and one VOLE profile. The profile selects the proof tree geometry
+through two parameters, denoted $(\tau,\kappa_V)$. The implementation
+supports only the two level-1 MAYO parameter sets shown below.
+
+\begin{table}[H]
+  \centering
+  \caption{Supported combined suites. MAYO values follow the Round 2
+  specification~\cite{mayo-round2}.}
+  \begin{tabular}{lrrrr}
+    \toprule
+    Suite & $n$ & $m$ & $o$ & $k$ \\
+    \midrule
+    MAYO1 & 86 & 78 & 8 & 10 \\
+    MAYO2 (default) & 81 & 64 & 17 & 4 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The implementation first hashes the expanded public quadratic forms in their
+canonical visitation order:
+\begin{align*}
+  h_{\mathrm{pk}} = \XOF(&
+    \domain{VOLE-ARC/mayo-public-key/v1} \concat
+    \LE{8}(n) \concat \LE{8}(m) \concat \LE{8}(o) \concat \LE{8}(k) \\
+    &{}\concat \operatorname{forms}(P^*), 32).
+\end{align*}
+It then derives the issuer context
+\begin{align*}
+ I = \XOF(&\domain{VOLE-ARC/issuer-context/v1} \concat
+   \LE{8}(|A|) \concat A \concat h_{\mathrm{pk}} \concat
+   \operatorname{name}(P) \\
+   &{}\concat \LE{8}(32) \concat \LE{8}(\tau) \concat
+   \LE{8}(\kappa_V),32).
+\end{align*}
+The value 32 fixes the presentation-counter width. The domain version, suite
+name, and profile parameters keep keys for distinct relations in distinct
+protocol contexts.
+
+\subsection{Application contexts}
+
+Four public values separate credential policy, rate-limit policy, and request
+binding:
+
+\begin{table}[H]
+  \centering
+  \caption{Public application inputs.}
+  \begin{tabularx}{\textwidth}{@{}lXl@{}}
+    \toprule
+    Value & Meaning & Expected lifetime \\
+    \midrule
+    $CC$ & Credential context, such as an attestation class or credential
+      epoch & Credential lifetime \\
+    $PC$ & Presentation context naming a relying party, purpose, and optional
+      epoch & One rate-limit bucket \\
+    $B$ & Digest of a challenge or protected request & One request \\
+    $L$ & Nonzero, public presentation limit & Server policy \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+For arbitrary application bytes $a$ and request bytes $b$:
+\begin{align*}
+  CC &= H_{\domain{VOLE-ARC/credential-context/v1}}(a),\\
+  B  &= H_{\domain{VOLE-ARC/presentation-binding/v1}}(b).
+\end{align*}
+A generic bucket is
+\[
+  PC = H_{\domain{VOLE-ARC/presentation-context/v1}}(p).
+\]
+The convenience constructor for relying party $R$, purpose $U$, and optional
+epoch $E$ instead computes
+\[
+  PC = H_{\domain{VOLE-ARC/scoped-presentation/v1}}(R,U,e,E),
+\]
+where $e$ is the one-byte value 1 when an epoch is present and 0 otherwise;
+$E$ is empty when absent. Framing distinguishes every component, including
+an absent epoch from a present empty epoch.
+
+Two fixed-width effective scopes keep the in-circuit SHAKE messages within
+one 136-byte rate block:
+\begin{align*}
+  CS &= \XOF(\domain{VOLE-ARC/credential-scope/v1}
+             \concat I \concat CC,32),\\
+  PS &= \XOF(\domain{VOLE-ARC/presentation-scope/v1}
+             \concat I \concat CC \concat PC,32).
+\end{align*}
+Neither $B$ nor $L$ appears in $PS$. A new request does not reset a bucket.
+Raising $L$ extends the existing nonce range; it does not create a second
+allowance. The verifier, not the client, must select $PC$ from trusted policy.
+
+\subsection{Credential issuance}
+
+The client samples independent uniform values
+\[
+  k \leftarrow {\{0,1\}}^{256},
+  \qquad
+  \rho \leftarrow {\{0,1\}}^{256}.
+\]
+Here $k$ is the scoped-tag key and $\rho$ hides its credential commitment.
+It computes
+\[
+  C = \Prefix_m\!\left(
+      \XOF(\domain{VOLE-ARC/credential/v1}
+           \concat CS \concat k \concat \rho,\lceil m/2\rceil)
+      \right) \in \F^m .
+\]
+$\Prefix_m$ reads the low nibble and then the high nibble of each byte,
+discarding the final high nibble if $m$ is odd.
+
+The client sends $(C,\pi_{\mathrm{issue}})$, where the VOLE-in-the-head proof
+establishes
+\[
+  \pi_{\mathrm{issue}} =
+  \PoK\{(k,\rho): C =
+  \operatorname{CredentialHash}(CS,k,\rho)\}.
+\]
+The Fiat-Shamir statement is the byte string
+\[
+  \domain{VOLE-ARC/issue-statement/v1} \concat
+  \LE{8}(|\operatorname{name}(P)|) \concat \operatorname{name}(P) \concat
+  I \concat CC \concat \LE{8}(m) \concat C_{\mathrm{bytes}}.
+\]
+Each field element in $C_{\mathrm{bytes}}$ occupies one byte in the statement.
+
+The issuer verifies the proof under its policy-selected $CC$. Only after
+acceptance does it sample a fresh 32-byte salt $\zeta$. It computes
+\begin{align*}
+  T = \Prefix_m\!\left(
+      \XOF(\domain{VOLE-ARC/signed/v1}
+           \concat \pack(C) \concat \zeta,\lceil m/2\rceil)
+      \right)
+\end{align*}
+and samples a MAYO preimage
+\[
+  \sigma \leftarrow \operatorname{SPre}(sk,T)
+  \quad\text{such that}\quad P^*(\sigma)=T.
+\]
+The response is $(\sigma,\zeta)$. The client checks $P^*(\sigma)=T$ against
+its retained $C$ before storing
+\[
+  \mathsf{cred}=(I,CC,\sigma,k,\rho,\zeta,\mathsf{next}=\varnothing).
+\]
+
+The signer chooses $\zeta$ after proof verification so the client cannot
+choose the exact MAYO target. Reissuing a response for the same request
+changes $(\sigma,\zeta)$ but not $(k,\rho)$; all such responses remain one
+tag lineage. This ordering is a design condition, not by itself a
+one-more-preimage proof.
+
+\subsection{Presentation}
+
+A challenge is $(CC,PC,L,B)$ with $1\leq L\leq 2^{32}-1$. The client requires
+that the challenge's $CC$ match the credential. It reads
+$i=\mathsf{next}[PC]$, using zero when the bucket is new, and rejects when
+$i\geq L$. It derives
+\[
+  t = \XOF(\domain{VOLE-ARC/tag/v1}
+           \concat k \concat PS \concat \LE{4}(i),32).
+\]
+
+The presentation proof establishes knowledge of
+$(\sigma,k,\rho,\zeta,i)$ satisfying
+\begin{align}
+ C &= \operatorname{CredentialHash}(CS,k,\rho), \label{eq:cred-hash}\\
+ T &= \operatorname{SignedCredentialHash}(C,\zeta), \label{eq:signed-hash}\\
+ P^*(\sigma) &= T, \label{eq:mayo}\\
+ t &= \operatorname{TagHash}(k,PS,i), \label{eq:tag}\\
+ 0 &\leq i < L. \label{eq:range}
+\end{align}
+The commitment $C$ and signed target $T$ are hidden intermediate wires.
+The Fiat-Shamir statement contains
+\[
+\begin{split}
+ &\domain{VOLE-ARC/presentation-statement/v1} \concat
+ \LE{8}(|\operatorname{name}(P)|) \concat \operatorname{name}(P) \concat I\\
+ &\qquad{}\concat CC \concat PC \concat \LE{4}(L) \concat B \concat t.
+\end{split}
+\]
+
+The circuit bit-decomposes $i$ in little-endian order. It constrains the
+carry chain for the 32-bit addition $i+\neg L+1$. With initial carry
+$c_{-1}=1$, each $c_j$ is the majority bit of
+$(i_j,{\left(\neg L\right)}_j,c_{j-1})$. The final carry is one exactly when
+$i\geq L$, so the circuit constrains $c_{31}=0$.
+
+After proof construction succeeds, the client stores
+$\mathsf{next}[PC]\leftarrow i+1$ and returns $(t,\pi_{\mathrm{present}})$.
+The nonce and credential are not transmitted.
+
+\subsection{Verification and scoped accounting}
+
+The verifier reconstructs $CS$, $PS$, the circuit, and the Fiat-Shamir
+statement from its authenticated public key and challenge policy. It verifies
+$\pi_{\mathrm{present}}$. On success it performs one operation:
+\[
+  \Store.\operatorname{insert\_if\_absent}(PS,t).
+\]
+The presentation is accepted only when this operation inserts the first
+durable copy.
+
+The rate-limit argument has a narrow boundary. Suppose the proof system is
+sound and extractable for the stated relation, the signed commitment has one
+effective opening, and the tag hash does not collide on distinct extracted
+inputs. Every accepted proof then yields an $i$ in the $L$-element set
+$\{0,\ldots,L-1\}$. Two presentations with the same credential, $PS$, and
+$i$ have the same tag. A linearizable uniqueness store accepts that tag once.
+Thus one credential lineage has at most $L$ accepted presentations under
+$PS$.
+
+This is a per-credential bound. A principal holding $q$ independently issued
+credentials can obtain up to $qL$ accepted presentations in the bucket.
+Attestation and issuance policy determine whether that is acceptable.
+
+\section{State, encoding, and failure boundaries}
+
+\subsection{Client state}
+
+The counter map is privacy-critical and is not authenticated by
+Equations~\eqref{eq:cred-hash}--\eqref{eq:mayo}. The canonical credential
+encoding can detect a malformed or cryptographically invalid credential, but
+it cannot detect a removed counter, a lower counter, or an older authentic
+snapshot. Storage therefore needs confidentiality, integrity, and monotonic
+rollback protection.
+
+The required send order is:
+\begin{enumerate}
+  \item construct the presentation;
+  \item atomically persist the incremented credential state; and
+  \item transmit the presentation.
+\end{enumerate}
+A crash after step 2 can consume capacity. A rollback can repeat a public tag,
+which links the retry and should be rejected. It does not add capacity while
+the verifier store remains intact. Concurrent copies of one credential can
+also emit the same tag.
+
+The implementation retains at most 4096 presentation-context counters. It
+fails when a new context would exceed that bound. Silent eviction would reset
+a counter and is not permitted.
+
+\subsection{Verifier state}
+
+\Store must be linearizable across verifier replicas and durable before it
+reports a successful insertion. Its recovery point must be at least as recent
+as the protected application state. The protected action and tag consumption
+need transaction semantics appropriate to the application. The included
+in-memory store provides only single-process test behavior.
+
+Proof verification occurs before insertion. Invalid clients can therefore
+force proof-verification work. Wire-size limits do not replace admission,
+concurrency, and CPU controls.
+
+\subsection{Canonical envelope}
+
+Every encoded artifact begins with this nine-byte header:
+\[
+  \domain{VARC} \concat
+  \domain{01} \concat
+  \operatorname{artifact} \concat
+  \operatorname{suite} \concat
+  \domain{0000}.
+\]
+The last two bytes are reserved and must be zero. Variable-length byte strings
+use a four-byte little-endian length. Nibbles are packed low first. Decoders
+reject a wrong artifact or suite, an unsupported version, nonzero reserved
+bytes, noncanonical nibble padding, unsorted or duplicate counters, zero
+stored counters, trailing bytes, and artifacts over 32 MiB.
+
+\begin{table}[H]
+  \centering
+  \caption{Artifact identifiers and exposure.}
+  \begin{tabularx}{\textwidth}{@{}clX@{}}
+    \toprule
+    ID & Artifact & Boundary \\
+    \midrule
+    1 & Public key & Public configuration and expanded MAYO map \\
+    2 & Issuer key & Secret local state; unsealed \\
+    3 & Issue request & Network artifact: packed $C$ and proof \\
+    4 & Issue response & Network artifact: packed $\sigma$ and $\zeta$ \\
+    5 & Pending issue & Secret local state; unsealed \\
+    6 & Credential & Secret local state and counter map; unsealed \\
+    7 & Presentation & Network artifact: tag and proof \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The envelope is a local research format. It is not a Privacy Pass TLS
+structure, and no independent implementation provides a byte-level
+interoperability oracle.
+
+\section{Parameters and measured cost}
+
+The combined suite is limited by the VOLE layer, not only by MAYO. Both
+profiles use lambda-128 VOLE parameters and 128-bit hidden proof-tree seeds.
+Adding MAYO3 or MAYO5 without widening and reanalyzing the proof system would
+misstate the security of the result. NIST selected MAYO to continue to the
+third evaluation round in May 2026, but it remains a candidate rather than a
+standard~\cite{nist-ir-8610}.
+
+For MAYO2, $m=64$ makes $C$ and $T$ 256 bits. A generic collision has an
+ideal cost near $2^{128}$ classically and $2^{256/3}\approx 2^{85.3}$
+quantum queries under a BHT-style collision model. MAYO1 uses $m=78$, giving
+312-bit values and corresponding ceilings near $2^{156}$ and $2^{104}$.
+The degree-16 polynomial assertion contributes the bounded term
+\[
+  \frac{16+1}{2^{128}} = \frac{17}{2^{128}} \approx 2^{-123.91}.
+\]
+These are component ceilings, not a complete advantage bound. The proof
+system's 128-bit hidden seeds also have a generic $2^{64}$ Grover query
+ceiling.
+
+Table~\ref{tab:bench} records one machine-specific balanced-profile snapshot.
+It is useful for implementation planning, not cross-platform prediction.
+The source benchmark uses Criterion with seeded fixtures and excludes network
+and durable-database latency.
+
+\begin{table}[H]
+  \centering
+  \caption{Balanced profile mean latency on an Apple M4 Pro, 28 July 2026.}
+  \label{tab:bench}
+  \begin{tabular}{lrr}
+    \toprule
+    Operation & MAYO2 & MAYO1 \\
+    \midrule
+    Issuance, end to end & 13.28 ms & 18.50 ms \\
+    Presentation proof & 26.48 ms & 38.44 ms \\
+    Presentation verification & 7.37 ms & 15.62 ms \\
+    Presentation, end to end & 33.86 ms & 54.61 ms \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{minipage}{\textwidth}
+The balanced MAYO2 issue request is 55,286 bytes and its presentation is
+138,550 bytes. The expanded public-key envelope is 106,329 bytes. These sizes
+come largely from the generic VOLE proof, which checks three in-circuit
+SHAKE256 evaluations, the whipped MAYO map, and the 32-bit comparison. They
+explain why this prototype is slower and larger than a specialized
+group-based ARC construction.
+\end{minipage}
+
+\section{Security status and open proof obligations}
+\label{sec:security}
+
+\subsection{Candidate assumptions}
+
+The intended claims depend on all of the following:
+\begin{enumerate}
+  \item the selected MAYO map and trapdoor sampler provide the needed
+        preimage unforgeability for fresh signer-salted targets;
+  \item the pinned VOLE-in-the-head backend is sound and zero knowledge for
+        the exact composed relation and transcript;
+  \item domain-separated SHAKE256 supplies the commitment hiding, tag
+        pseudorandomness, collision resistance, and Fiat-Shamir behavior used
+        by the construction; and
+  \item every key, credential secret, signer salt, MAYO sample, and proof uses
+        a cryptographically secure random source.
+\end{enumerate}
+
+The implementation pins the MAYO and VOLE dependencies to VOLE-ACT revision
+\domain{e3734dd}~\cite{vole-act}.
+A source pin fixes reviewed code; it does not inherit a composition theorem.
+
+\subsection{Missing proof}
+
+There is no end-to-end reduction for adaptive issuance followed by multiple
+presentations. A useful classical ideal-XOF theorem still needs to account
+for online extraction before signing, the exact MAYO preimage sampler,
+commitment collisions, tag and range soundness, Fiat-Shamir composition,
+multi-user loss, and durable duplicate state. A fixed-SHAKE proof and a QROM
+analysis are separate obligations.
+
+Consequently, this note does not establish blind issuance, unlinkability,
+unforgeability, or post-quantum security as theorems. It specifies the games'
+intended mechanism and the implementation boundary that a proof must cover.
+
+\subsection{Side channels and secret lifetime}
+
+Locally owned secret buffers, circuit witnesses, Keccak states, and decoder
+staging buffers are zeroized on a best-effort basis. Credential
+authentication compares field encodings in constant time. Presentation
+construction avoids a redundant native MAYO evaluation.
+
+Those measures do not make the full implementation constant time. Dependency
+allocations and copies are outside the wrapper's wiping guarantees. The
+pinned prover contains secret-dependent branches in constraint bookkeeping
+and VOLE mask construction. The counter map is a non-oblivious tree whose
+allocation and lookup patterns can expose local usage history.
+
+\begin{minipage}{\textwidth}
+A fixed-vs-fixed timing diagnostic measured MAYO1 signing, MAYO2 signing, and
+MAYO2 presentation proving. In one 2026-07-28 run, all reported Welch
+statistics satisfied $|t|\leq 1.076$. This is a regression signal for one
+compiler, machine, and input partition. It is not constant-time
+certification. No machine-code audit, ctgrind run, power or EM analysis, fault
+campaign, or traffic analysis has been completed.
+\end{minipage}
+
+\subsection{Deployment boundary}
+
+Even a successful cryptographic proof would not supply the following:
+\begin{itemize}
+  \item policy that prevents one principal from obtaining extra credentials;
+  \item canonical, server-controlled relying-party and epoch construction;
+  \item authenticated public-key distribution, rotation, and revocation;
+  \item rollback-resistant client storage and a replicated durable tag store;
+  \item transaction coupling between tag insertion and the protected action;
+  \item resistance to request flooding, network linkage, cookies, or logs; or
+  \item compiler, hardware, RNG, and fault resistance.
+\end{itemize}
+
+Production use requires an independently reviewed reduction, independent
+cryptanalysis, a second implementation with stable test vectors, sustained
+fuzzing, side-channel and fault review, and crash-tested replicated state.
+Unit tests, limited fuzz campaigns, source-level zeroization, and the timing
+diagnostic are evidence about specific implementation paths only.
+
+\section{Implementation conformance checks}
+
+The repository makes review obligations executable where possible. One
+canonical script drives Rust formatting, Clippy, unit tests with parallel and
+sequential backends, warning-free Rustdoc, shell linting, paper linting and
+build, fuzz-target build and lint, license/source policy, and advisory scans.
+Tracked pre-commit and pre-push hooks invoke the quick and full forms of that
+script, and CI invokes the same component commands.
+
+Deterministic tests fingerprint all five public artifacts for MAYO1 and
+MAYO2. Negative tests cover statement binding, cross-key use, limit changes,
+nonce equality at the bound, rollback duplicates, canonical decoding, and
+sampled wire mutations. Fuzz targets cover all seven decoders plus valid-key
+authenticated paths. These checks are designed to catch implementation drift;
+they do not substitute for the proof and review work in
+Section~\ref{sec:security}.
+
+\bibliographystyle{plainnat}
+\bibliography{paper/references}
+
+\end{document}
