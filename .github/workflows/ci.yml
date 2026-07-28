@@ -14,8 +14,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install the minimum supported Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
-      - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install --yes shellcheck
+      - name: Install repository hygiene tools
+        run: sudo apt-get update && sudo apt-get install --yes ripgrep shellcheck
       - name: Check repository hygiene
         run: scripts/check.sh hygiene
 
@@ -50,6 +50,7 @@ jobs:
           chktex
           latexmk
           poppler-utils
+          ripgrep
           texlive-fonts-recommended
           texlive-latex-extra
           texlive-latex-recommended
