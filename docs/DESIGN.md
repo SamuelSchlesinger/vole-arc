@@ -109,8 +109,12 @@ credential = (I, Cctx, sigma, k, rho, zeta, counters = {}).
 
 Repeatedly inverting one client-selected MAYO target would require a different
 one-more-preimage assumption and simulator. By sampling `zeta` after request
-acceptance, the signer gets a fresh hash-then-invert target. This motivates the
-construction but is not a proof of the full protocol.
+acceptance, the signer gets a fresh hash-then-invert target. The protocol paper
+reduces authentication of a new commitment to a multi-target
+auxiliary-preimage one-wayness game for the raw whipped MAYO map and exact
+`SPre` sampler in the classical ideal-XOF model. That game is an explicit
+candidate assumption; it is not established by standard MAYO signature
+security.
 
 Repeated responses to one issuance request have different salts and
 authenticators but the same `(k, rho)`. They therefore produce the same scoped
@@ -142,6 +146,11 @@ The public Fiat-Shamir statement contains:
 protocol version, MAYO parameter set, I, Cctx, Pctx, L, B, tag.
 ```
 
+`B` is transcript-only: it does not enter the tag domain or witness equations.
+The scoped cap therefore does not depend on it, while the claim that a proof
+cannot transfer to a different `B` depends on full-statement Fiat-Shamir
+binding.
+
 The nonce is bit-decomposed inside the circuit. To prove `i < L`, the circuit
 computes the carry chain for `i + !L + 1` and constrains the final carry to
 zero. The final carry is one exactly when `i >= L`.
@@ -156,15 +165,23 @@ challenge policy, then verifies the proof. It atomically inserts `(PS, tag)`
 into a durable uniqueness store. Only the first insertion can authorize the
 protected action.
 
-Assuming proof soundness and extraction, credential unforgeability, and tag
-collision resistance:
+Assuming online proof extraction, authenticated-commitment unforgeability,
+binding of the credential hash, and a linearizable durable store:
 
-1. every accepted presentation has a valid credential secret `k`;
+1. every accepted presentation extracts to an issued credential lineage;
 2. its nonce is one of the `L` integers in `[0, L)`;
 3. `(k, PS, i)` determines one tag; and
 4. the store accepts a tag once.
 
 One credential has at most `L` accepted presentations for `PS`.
+With `q` issued lineages the bound is `q * L`. If accepted challenges under
+one `PS` use different limits, replace `L` with the largest accepted limit.
+
+Tag collision resistance is not needed for this upper bound. A collision on
+two distinct tag inputs makes the store merge uses, which reduces capacity or
+causes denial of service. The binding requirement is instead that one
+authenticated commitment cannot open to distinct credential-hash inputs and
+therefore distinct tag keys.
 
 Changing `L` does not create a new tag domain. If a server first uses `L=5`
 and later `L=10`, nonces `0..4` retain their old tags and only `5..9` add

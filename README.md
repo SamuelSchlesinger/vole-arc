@@ -18,10 +18,13 @@ VOLE-ARC does not implement ARC(P-256) and is not wire-compatible with token
 type `0xE5AC`. It uses an experimental, publicly verifiable MAYO/VOLE
 construction and keeps the presentation nonce hidden.
 
-This is unaudited research cryptography. The protocol lacks complete
-reductions, an independent implementation, a cryptographic audit, and a
-compiler or physical side-channel review. Do not use it to protect production
-traffic, accounts, money, or scarce resources.
+This is unaudited research cryptography. The protocol paper gives a
+conditional scoped-accounting proof and a classical ideal-XOF reduction for
+the signer-salted wrapper, but the required MAYO and proof-system assumptions
+are not proved for the pinned implementation. Fixed-Keccak and QROM analyses,
+an independent implementation, a cryptographic audit, and compiler and
+physical side-channel reviews are also missing. Do not use it to protect
+production traffic, accounts, money, or scarce resources.
 
 MAYO2 is the default parameter set, matching VOLE-ACT's category-1 choice.
 MAYO1 remains available as a slower category-1 option with a wider

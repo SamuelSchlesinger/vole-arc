@@ -42,6 +42,8 @@ required_phrases=(
     "VOLE-ARC: Scoped Anonymous Rate-Limited Credentials"
     "Protocol specification"
     "Security status and open proof obligations"
+    "Scoped-accounting theorem"
+    "Multi-target auxiliary-preimage one-wayness"
     "not wire-compatible"
 )
 for required_phrase in "${required_phrases[@]}"; do

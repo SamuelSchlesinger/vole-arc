@@ -3,6 +3,7 @@
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath}
 \usepackage{amssymb}
+\usepackage{amsthm}
 \usepackage{booktabs}
 \usepackage{enumitem}
 \usepackage{float}
@@ -39,6 +40,15 @@
 \newcommand{\PoK}{\operatorname{PoK}}
 \newcommand{\Store}{\ensuremath{\mathsf{Store}}}
 \newcommand{\domain}[1]{\texttt{#1}}
+\newcommand{\Adv}{\operatorname{Adv}}
+\newcommand{\Bad}{\mathsf{Bad}}
+\newcommand{\Issued}{\mathcal{I}}
+
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
 
 \title{\textbf{VOLE-ARC: Scoped Anonymous Rate-Limited Credentials}}
 \author{Protocol and implementation note}
@@ -56,10 +66,14 @@ The counter range therefore bounds accepted presentations per credential and
 context. The construction follows the scoped rate-limit pattern of the
 Privacy Pass ARC work, but replaces its P-256 credential and Schnorr proof
 with signer-salted MAYO authentication and a VOLE-in-the-head proof of the
-complete relation. This note specifies the implemented protocol, its state
-requirements, wire envelope, parameter limits, and security gaps. VOLE-ARC is
-a research prototype, not a production scheme or an interoperable Privacy
-Pass ciphersuite.
+complete relation. This note specifies the implemented protocol and proves a
+conditional scoped-accounting theorem. It also reduces the signer-salted
+wrapper to an explicit auxiliary-preimage random-target assumption in the
+classical ideal-XOF model. The proof does not establish that assumption for
+MAYO, prove the pinned proof backend extractable or zero knowledge, or cover
+fixed Keccak, quantum oracle access, side channels, or deployment failures.
+VOLE-ARC is a research prototype, not a production scheme or an interoperable
+Privacy Pass ciphersuite.
 \end{abstract}
 
 \tableofcontents
@@ -89,10 +103,12 @@ Its local envelope starts with \domain{VARC}, not Privacy Pass token type
 specify an HTTP binding.
 
 This document describes the Rust implementation at the repository's initial
-snapshot. It is not a security proof. Section~\ref{sec:security} states the
-assumptions and unresolved proof obligations.
+snapshot. Section~\ref{sec:security} proves the protocol's accounting
+composition under explicit assumptions and identifies the assumptions that
+remain unproved for the implementation.
 
 \section{Protocol specification}
+\label{sec:protocol}
 
 \subsection{Notation and roles}
 
@@ -330,18 +346,19 @@ $\pi_{\mathrm{present}}$. On success it performs one operation:
 The presentation is accepted only when this operation inserts the first
 durable copy.
 
-The rate-limit argument has a narrow boundary. Suppose the proof system is
-sound and extractable for the stated relation, the signed commitment has one
-effective opening, and the tag hash does not collide on distinct extracted
-inputs. Every accepted proof then yields an $i$ in the $L$-element set
-$\{0,\ldots,L-1\}$. Two presentations with the same credential, $PS$, and
-$i$ have the same tag. A linearizable uniqueness store accepts that tag once.
-Thus one credential lineage has at most $L$ accepted presentations under
-$PS$.
+Theorem~\ref{thm:accounting} gives the exact accounting argument. In brief,
+extraction assigns each accepted presentation to an authenticated credential
+lineage and an integer $i<L$. The tag is deterministic for that lineage,
+$PS$, and $i$, so the store can accept each such pair at most once. With $q$
+issued lineages and a fixed limit $L$, at most $qL$ presentations are
+accepted. If limits change without changing $PS$, the bound is
+$qL_{\max}$, where $L_{\max}$ is the largest accepted limit.
 
-This is a per-credential bound. A principal holding $q$ independently issued
-credentials can obtain up to $qL$ accepted presentations in the bucket.
-Attestation and issuance policy determine whether that is acceptable.
+Tag collision resistance is not needed for this upper bound. A collision
+between distinct tag inputs makes the store merge uses, reducing capacity or
+causing denial of service. The load-bearing binding property is instead that
+one authenticated commitment cannot open to two credential inputs and hence
+two tag keys.
 
 \section{State, encoding, and failure boundaries}
 
@@ -473,37 +490,343 @@ group-based ARC construction.
 \section{Security status and open proof obligations}
 \label{sec:security}
 
-\subsection{Candidate assumptions}
+\subsection{Model}
 
-The intended claims depend on all of the following:
+Let $\mathcal{Y}=\F^m$ and $\mu=\log_2|\mathcal{Y}|=4m$. Write the three
+secret-input functions as
+\begin{align*}
+ H_C(CS,k,\rho) &\in \mathcal{Y},\\
+ H_S(C,\zeta) &\in \mathcal{Y},\\
+ H_T(k,PS,i) &\in {\{0,1\}}^{256}.
+\end{align*}
+These abbreviations include the domains and encodings in
+Section~\ref{sec:protocol}. The accounting theorem treats them as arbitrary
+deterministic functions. It does not model SHAKE256 as random.
+
+The proof system is used as an adaptive, multi-theorem non-interactive
+argument of knowledge. Its extractor must return $(k,\rho)$ for every
+accepted issuance proof before the issuer authenticates that commitment, and
+$(\sigma,k,\rho,\zeta,i)$ for every accepted presentation before the store
+authorizes the protected action. Extraction is straight-line and online:
+rewinding an already stateful issuer or verifier is not part of the
+experiment. Let $\epsilon_{\mathrm{ext}}$ bound the probability that any
+accepted proof in the experiment lacks such an extracted witness satisfying
+the exact relation and statement.
+
+Each successful issuance response is entered in an extraction ledger
+\[
+  \Issued=\{(CS,C,k,\rho):
+      C=H_C(CS,k,\rho)
+      \text{ and the issuer returned an authenticator for }C\}.
+\]
+Repeated requests with the same extracted input make one lineage. The
+following events cover the other ways an accepted presentation could escape
+that ledger:
+\begin{itemize}
+  \item $\Bad_{\mathrm{auth}}$: an extracted tuple contains
+        $P^*(\sigma)=H_S(C,\zeta)$ for a commitment $C$ that received no
+        successful issuance response;
+  \item $\Bad_{\mathrm{bind}}$: two distinct relevant inputs
+        $(CS,k,\rho)\ne(CS',k',\rho')$ have the same $H_C$ output; and
+  \item $\Bad_{\mathrm{store}}$: the store accepts the same $(PS,t)$ twice,
+        loses a successful insertion before the protected action is
+        irreversible, authorizes more than one protected action per
+        insertion, or lets an action occur without a successful insertion.
+\end{itemize}
+Write their probabilities as $\epsilon_{\mathrm{auth}}$,
+$\epsilon_{\mathrm{bind}}$, and $\epsilon_{\mathrm{store}}$. The store term is
+an operational assumption, not a cryptographic advantage.
+
+\begin{lemma}[Range relation]
+\label{lem:range}
+For $i,L\in\{0,\ldots,2^{32}-1\}$, with $L>0$, the circuit's final carry is
+zero exactly when $i<L$.
+\end{lemma}
+
+\begin{proof}
+The circuit adds $i+\neg L+1$ as 32-bit unsigned integers. Since
+$\neg L=2^{32}-1-L$, the untruncated sum is $i+2^{32}-L$. It has a carry out
+of bit 31 exactly when it is at least $2^{32}$, equivalently when $i\geq L$.
+The circuit constrains that carry to zero.
+\end{proof}
+
+\subsection{Scoped-accounting theorem}
+
+\begin{theorem}[Scoped accounting]
+\label{thm:accounting}
+Fix one authenticated issuer key and effective values $CS$ and $PS$. Suppose
+at most $q$ distinct entries of $\Issued$ have credential scope $CS$. Let an
+adaptive adversary submit presentations under challenges whose reconstructed
+credential and presentation scopes are $CS$ and $PS$, whose bindings may
+differ, and whose nonzero limits satisfy $L_j\leq L_{\max}$. If
+$\mathsf{Acc}_{PS}$ is the number of protected actions authorized by first
+insertions in that bucket, then
+\[
+ \Pr[\mathsf{Acc}_{PS}>qL_{\max}]
+ \leq
+ \epsilon_{\mathrm{ext}}+
+ \epsilon_{\mathrm{auth}}+
+ \epsilon_{\mathrm{bind}}+
+ \epsilon_{\mathrm{store}}.
+\]
+\end{theorem}
+
+\begin{proof}
+Condition on the complement of all four bad events. Extract an accepted
+presentation witness and set
+\[
+ C=H_C(CS,k,\rho),\qquad
+ t=H_T(k,PS,i).
+\]
+Lemma~\ref{lem:range} gives $i<L_j\leq L_{\max}$. Since authentication does
+not fail, $C$ is the commitment of an entry in $\Issued$. Since binding does
+not fail, the extracted $(CS,k,\rho)$ equals that issued entry's input. Thus
+every accepted presentation is assigned to a pair
+\[
+   (\text{issued lineage},i)
+   \in \{1,\ldots,q\}\times\{0,\ldots,L_{\max}-1\}.
+\]
+Two accepted presentations assigned to the same pair have identical $k$,
+$PS$, and $i$, hence the same deterministic tag $t$. The store cannot accept
+both. The assignment is therefore injective, and its codomain has
+$qL_{\max}$ elements. Taking a union bound over the excluded events proves
+the result.
+\end{proof}
+
+\begin{remark}[What the theorem does not require]
+The proof does not assume that $H_T$ is collision resistant. Distinct pairs
+that collide under $H_T$ compete for one store entry, so a collision can only
+reduce the number accepted. Tag pseudorandomness is required for privacy, not
+for the upper bound. Honest client counter monotonicity is also unnecessary
+for accounting: rollback repeats a pair and the store rejects it. Client
+monotonicity instead prevents linkable retries and lost capacity.
+\end{remark}
+
+For a fixed limit $L$, the theorem gives the advertised $qL$ bound. When a
+server first uses $L=5$ and later $L=10$ under the same $PS$, it gives ten
+total positions per lineage, not five plus ten. The theorem counts
+credentials, not people: issuance policy must enforce any intended
+per-principal value of $q$.
+
+The count above is by effective $CS$. To identify it with a named
+$(I,CC)$ policy, the scope hash must not collide on two policy inputs.
+Likewise, separate relying-party or epoch buckets require distinct effective
+$PS$ values. A $CS$ collision can import a lineage from another named
+credential policy, while a $PS$ collision merges store buckets. Neither
+violates the theorem when $q$ and the bucket are defined by effective values,
+but both invalidate the corresponding named-context claim.
+
+\begin{remark}[Request binding]
+The value $B$ is bound to the Fiat-Shamir statement but does not enter the
+witness equations or $PS$. This is deliberate: changing a request must not
+reset the bucket. The accounting theorem remains true even if a proof could
+transfer between two $B$ values, because its tag still enters the same store.
+The stronger claim that a captured proof verifies only for its original $B$
+requires statement binding of the exact Fiat-Shamir transcript. Knowledge
+soundness alone does not imply non-transferability between two true
+statements.
+\end{remark}
+
+\subsection{Classical ideal-XOF bounds}
+
+This subsection makes the hash terms and signer-salted authentication
+assumption explicit. Each domain-separated SHAKE256 use is modeled as an
+independent classical random oracle with the output length used by the
+protocol. Key generation, credential secrets, nonces, salts, sampler coins,
+and proof coins are assumed to use independent cryptographically secure
+randomness.
+
+If $Q_C$ distinct credential-hash inputs are evaluated across honest
+generation, adversarial queries, extracted witnesses, and verification, then
+\begin{equation}
+\label{eq:binding-bound}
+  \epsilon_{\mathrm{bind}}
+  \leq \frac{\binom{Q_C}{2}}{2^\mu}.
+\end{equation}
+This count must include offline grinding; counting only the two openings
+eventually presented would be invalid. For either 256-bit scope hash,
+$Q_{\mathrm{scope}}$ distinct inputs collide with probability at most
+$\binom{Q_{\mathrm{scope}}}{2}/2^{256}$.
+
+The raw whipped MAYO map is not used through the standard MAYO signature
+interface. The required property must therefore name the exact trapdoor
+sampler.
+
+\begin{definition}[Multi-target auxiliary-preimage one-wayness]
+\label{def:mt-apow}
+The $\mathsf{MT\text{-}APOW}_{P^*,\mathrm{SPre}}(q_A,q_T)$ game generates a
+MAYO trapdoor and publishes $P^*$. An auxiliary-sample query chooses uniform
+$Y\leftarrow\mathcal{Y}$ and runs the exact
+$\mathrm{SPre}(sk,Y)$ algorithm, including its randomness, rejection
+behavior, and possible failure. It returns $(Y,\sigma)$ on success and
+$(Y,\bot)$ on failure. A target query returns an independent uniform
+$Y\leftarrow\mathcal{Y}$. The adversary wins if it gives a preimage under
+$P^*$ of either a target-query value or an auxiliary-sample value for which
+it received $\bot$. Values may collide across queries; such collisions are
+part of the game's advantage. Let
+\[
+ \Adv^{\mathsf{mt\text{-}apow}}_{P^*,\mathrm{SPre}}(q_A,q_T)
+\]
+be the maximum winning probability over efficient adversaries making at most
+$q_A$ auxiliary-sample and $q_T$ target queries.
+\end{definition}
+
+This is a multi-target random one-wayness assumption in the presence of exact
+signer samples. It is stronger and more specific than merely saying that
+MAYO signatures are existentially unforgeable.
+
+\begin{lemma}[Signer-salted wrapper]
+\label{lem:salted}
+Model $H_S$ as a classical random oracle. Give an adversary at most $q_I$
+authentication attempts. On input $C$, the oracle samples
+$\zeta\leftarrow{\{0,1\}}^{256}$ after receiving $C$, evaluates
+$Y=H_S(C,\zeta)$, runs the exact $\mathrm{SPre}(sk,Y)$ algorithm, and records
+$C$ only when it returns a response. If the adversary makes at most $Q_H$
+other distinct $H_S$ queries, then its probability of outputting
+$(C^*,\zeta^*,\sigma^*)$ such that
+\[
+ C^* \text{ was not recorded},\qquad
+ P^*(\sigma^*)=H_S(C^*,\zeta^*)
+\]
+is at most
+\begin{equation}
+\label{eq:salted-bound}
+ \Adv^{\mathsf{mt\text{-}apow}}_{P^*,\mathrm{SPre}}
+      (q_I,Q_H+1)
+ + \frac{q_I Q_H+\binom{q_I}{2}}{2^{256}}.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Allowing authentication attempts on arbitrary $C$ only strengthens the real
+issuer, which first requires a valid issuance proof.
+Simulate $H_S$ lazily. A new adversarial hash query consumes one target query
+from Definition~\ref{def:mt-apow}. On an authentication attempt, sample
+$\zeta$. If $(C,\zeta)$ is fresh and distinct from earlier authentication
+inputs, consume one auxiliary-sample query and program its uniform $Y$ at
+that point. The returned sampler outcome has exactly the real distribution.
+
+The simulation aborts if the adversary queried $(C,\zeta)$ before the
+authentication attempt, or if an earlier attempt used the same pair. The
+first event has probability at most $q_I Q_H/2^{256}$; the second at most
+$\binom{q_I}{2}/2^{256}$. These are union bounds over fresh uniform salts.
+
+If the final $(C^*,\zeta^*)$ was queried, a valid $\sigma^*$ inverts its
+target-query value. If it was not queried, make one final target query and
+test $\sigma^*$; revealing that target only after $\sigma^*$ is fixed cannot
+weaken the reduction. A final label matching a successful authentication
+label would have recorded the same $C^*$ and is excluded. A label from a
+failed authentication is a winning failed auxiliary-sample value. Target
+collisions with successful signer samples already count as wins in
+Definition~\ref{def:mt-apow}, so no separate collision term is hidden.
+\end{proof}
+
+Combining Theorem~\ref{thm:accounting},
+Equation~\eqref{eq:binding-bound}, and Lemma~\ref{lem:salted} gives the
+classical ideal-XOF accounting bound
+\begin{align}
+\Pr[\mathsf{Acc}_{PS}>qL_{\max}]
+\leq{}&
+ \epsilon_{\mathrm{ext}}+\epsilon_{\mathrm{store}}
+ + \frac{\binom{Q_C}{2}}{2^\mu} \notag\\
+&+
+ \Adv^{\mathsf{mt\text{-}apow}}_{P^*,\mathrm{SPre}}(q_I,Q_H+1)
+ + \frac{q_I Q_H+\binom{q_I}{2}}{2^{256}}.
+\label{eq:combined-bound}
+\end{align}
+Add the applicable 256-bit scope-collision term when $q$ is counted by named
+application contexts rather than effective $CS$. In particular,
+$\epsilon_{\mathrm{auth}}$ in Theorem~\ref{thm:accounting} is bounded by
+Lemma~\ref{lem:salted}.
+
+\subsection{Blind issuance and presentation privacy}
+
+Accounting reveals equality exactly where needed: the same
+$(k,PS,i)$ always reveals the same tag. Privacy can only be claimed for
+histories with the same public metadata and the same equality pattern of
+those hidden inputs. In particular, the issuer key, suite, profile, $CC$,
+$PC$, $L$, $B$, message count, and network-visible behavior must be matched.
+
+\begin{theorem}[Conditional transcript privacy]
+\label{thm:privacy}
+Consider $h$ honest, unexposed credentials whose $(k,\rho)$ pairs are sampled
+independently and uniformly. Model $H_C$ and $H_T$ as independent classical
+random oracles. Assume the issue and presentation arguments are adaptive
+multi-theorem zero knowledge for the exact, possibly adversarially selected
+public statements, with distinguishing advantage
+$\epsilon_{\mathrm{zk}}$. A view containing their issuance transcripts and
+presentations is indistinguishable from one in which:
 \begin{enumerate}
-  \item the selected MAYO map and trapdoor sampler provide the needed
-        preimage unforgeability for fresh signer-salted targets;
-  \item the pinned VOLE-in-the-head backend is sound and zero knowledge for
-        the exact composed relation and transcript;
-  \item domain-separated SHAKE256 supplies the commitment hiding, tag
-        pseudorandomness, collision resistance, and Fiat-Shamir behavior used
-        by the construction; and
-  \item every key, credential secret, signer salt, MAYO sample, and proof uses
-        a cryptographically secure random source.
+  \item issue and presentation proofs are simulated;
+  \item each honest credential commitment is a programmed uniform element of
+        $\mathcal{Y}$; and
+  \item each new honest tag input has a programmed uniform 256-bit output,
+        while a repeated input repeats its output.
 \end{enumerate}
+All other public fields and adversarial messages are unchanged.
+If the adversary makes $Q_C^{\mathrm{priv}}$ credential-hash queries and
+$Q_T^{\mathrm{priv}}$ tag-hash queries, the distinguishing advantage is at
+most
+\begin{equation}
+\label{eq:privacy-bound}
+ \epsilon_{\mathrm{zk}}
+ + \frac{hQ_C^{\mathrm{priv}}}{2^{512}}
+ + \frac{hQ_T^{\mathrm{priv}}}{2^{256}}.
+\end{equation}
+\end{theorem}
 
-The implementation pins the MAYO and VOLE dependencies to VOLE-ACT revision
-\domain{e3734dd}~\cite{vole-act}.
-A source pin fixes reviewed code; it does not inherit a composition theorem.
+\begin{proof}
+Replace the proofs one at a time by the adaptive zero-knowledge simulator.
+For each honest credential, sample its visible commitment uniformly and
+program $H_C$ at the hidden $(CS,k,\rho)$ input. Until that exact 512-bit
+secret pair is queried, the real and programmed views are identical. A union
+bound over credentials and oracle queries gives the second term of
+Equation~\eqref{eq:privacy-bound}.
 
-\subsection{Missing proof}
+Next sample each tag uniformly and program $H_T$ at
+$(k,PS,i)$, reusing an existing value for a repeated input. Conditioned on
+the earlier hybrids, each unexposed $k$ remains uniform. Even if $PS$ and
+$i$ are known, a tag-oracle query hits one of the $h$ hidden keys with
+probability at most $h/2^{256}$. The final union bound gives the third term.
+\end{proof}
 
-There is no end-to-end reduction for adaptive issuance followed by multiple
-presentations. A useful classical ideal-XOF theorem still needs to account
-for online extraction before signing, the exact MAYO preimage sampler,
-commitment collisions, tag and range soundness, Fiat-Shamir composition,
-multi-user loss, and durable duplicate state. A fixed-SHAKE proof and a QROM
-analysis are separate obligations.
+The ideal view makes the issuer's issuance-side transcript independent of the
+tag key except for exhaustive hidden-input queries, and makes tags on distinct
+inputs independent uniform strings. It therefore yields blind issuance and
+issuance-to-presentation and pairwise-presentation unlinkability under the
+theorem's matched-history conditions. A repeated tag, unusual public context,
+different limit, rollback pattern, or network identifier remains linkable by
+design or by the stated boundary. Accidental collisions between distinct
+uniform tags have probability at most $\binom{n_T}{2}/2^{256}$ over $n_T$
+honest tag inputs; they affect availability, not the accounting bound.
 
-Consequently, this note does not establish blind issuance, unlinkability,
-unforgeability, or post-quantum security as theorems. It specifies the games'
-intended mechanism and the implementation boundary that a proof must cover.
+\subsection{Instantiation boundary}
+
+The structural Theorem~\ref{thm:accounting} is independent of the random
+oracle model, but its assumptions are not yet theorems about the pinned code.
+The implementation pins MAYO and VOLE dependencies to VOLE-ACT revision
+\domain{e3734dd}~\cite{vole-act}. A source pin fixes code; it does not prove:
+\begin{itemize}
+  \item adaptive multi-theorem straight-line extraction or zero knowledge for
+        the exact degree-16 VOLE-in-the-head relations and Fiat-Shamir
+        transcript;
+  \item statement binding of that transcript to every public byte, including
+        the request binding $B$;
+  \item $\mathsf{MT\text{-}APOW}$ for the expanded MAYO1 or MAYO2 map with
+        the exact bounded-retry sampler;
+  \item a bridge from the oracle-augmented proof above to the circuit that
+        evaluates fixed Keccak internally; or
+  \item the same reductions for quantum superposition queries.
+\end{itemize}
+The degree-16 assertion term $17/2^{128}$ is one component of
+$\epsilon_{\mathrm{ext}}$, not a complete value for it. Multi-user proof
+attempts, vector-commitment security, VOLE consistency, Fiat-Shamir,
+composition losses, and all oracle queries must also be counted.
+
+Thus Equation~\eqref{eq:combined-bound} closes the protocol-level classical
+composition only conditionally. It is not a standard-model proof for SHAKE256,
+a QROM proof, a reduction of $\mathsf{MT\text{-}APOW}$ to the published MAYO
+assumptions, or an audit of the implementation.
 
 \subsection{Side channels and secret lifetime}
 

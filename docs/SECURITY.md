@@ -37,26 +37,50 @@ actually intended.
 
 ## Cryptographic assumptions and proof gaps
 
-The implementation depends on the following candidate assumptions:
+The protocol paper now proves a conditional scoped-accounting theorem. For
+one effective presentation scope, at most `q * L_max` presentations are
+accepted from `q` issued credential lineages, where `L_max` is the largest
+limit accepted in that bucket. The proof is structural: it maps each accepted
+presentation to an extracted `(lineage, nonce)` pair and uses the atomic tag
+store to show that each pair is accepted once. It does not require tag
+collision resistance; a tag collision reduces capacity.
 
-1. The selected MAYO public map and trapdoor sampler provide the required
-   preimage unforgeability for fresh signer-salted hash targets.
-2. The exact VOLE-in-the-head backend is sound and zero knowledge for the
-   composed relation: three hidden SHAKE256 evaluations, whipped-MAYO
-   verification, and the 32-bit comparison.
+The theorem depends on the following assumptions:
+
+1. The selected whipped MAYO public map and exact trapdoor sampler satisfy the
+   paper's multi-target auxiliary-preimage one-wayness game. The game gives an
+   adversary exact samples on random targets and asks it to invert an
+   additional random target.
+2. The exact VOLE-in-the-head backend has adaptive multi-theorem,
+   straight-line online extraction, zero knowledge, and full-statement
+   Fiat-Shamir binding for the composed relations: the hidden SHAKE256
+   evaluations, whipped-MAYO verification, and the 32-bit comparison.
 3. Domain-separated SHAKE256 behaves as the required hiding commitment,
-   keyed tag PRF, collision-resistant hash, and Fiat-Shamir/XOF primitive.
+   keyed tag PRF, collision-resistant hash, and Fiat-Shamir/XOF primitive in
+   the relevant model.
 4. Randomness used for MAYO keys, hidden credential values, signer salts,
    preimage sampling, and VOLE proofs is cryptographically secure.
 
-These assumptions do not prove the full protocol. The missing result is an
-end-to-end classical ideal-XOF theorem for adaptive issuance and multiple
-presentations. It must cover online extraction before signing, exact MAYO
-sampler accounting, tag/range soundness, and durable duplicate state. Fixed
-SHAKE/Keccak and the QROM also require separate analyses.
+In the classical ideal-XOF model, the paper reduces authentication of an
+unissued commitment to the MAYO assumption above and gives explicit salt and
+credential-collision terms. It also gives a conditional transcript-privacy
+hybrid for honest, unexposed credentials with matched public metadata.
 
-VOLE-ACT does not supply this composition theorem or a complete reduction for
-signer-salted MAYO. Pinning its implementation does not close either gap.
+This closes the protocol-level counting argument, not the primitive or
+implementation proof. The following remain open:
+
+- prove the multi-target auxiliary-preimage assumption from the published
+  MAYO foundation, including the exact bounded-retry `SPre` distribution;
+- prove adaptive online extraction and multi-theorem zero knowledge for the
+  pinned VOLE backend, plus binding of the exact Fiat-Shamir transcript to
+  every public statement byte;
+- bridge the ideal oracle used in the reduction to the fixed Keccak
+  computation inside the circuit;
+- give a QROM reduction and complete multi-user concrete bound; and
+- independently review the games, reductions, implementation, and parameters.
+
+VOLE-ACT does not supply these results. Pinning its implementation does not
+close them.
 
 ## Concrete ceilings and parameter choice
 
