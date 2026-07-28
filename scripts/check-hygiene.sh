@@ -14,6 +14,8 @@ report_failure() {
 required_files=(
     AGENTS.md
     CONTRIBUTING.md
+    LICENSE-APACHE
+    LICENSE-MIT
     README.md
     docs/DESIGN.md
     docs/SECURITY.md
@@ -46,7 +48,7 @@ done
 
 while IFS= read -r -d '' file; do
     case "$file" in
-        *.bib|*.md|*.rs|*.sh|*.tex|*.toml|*.yaml|*.yml|.editorconfig|.gitignore|.githooks/*)
+        LICENSE-*|*.bib|*.md|*.rs|*.sh|*.tex|*.toml|*.yaml|*.yml|.editorconfig|.gitignore|.githooks/*)
             ;;
         *)
             continue

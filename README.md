@@ -159,6 +159,15 @@ Benchmark methodology and the current machine-specific snapshot are in
 [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), and the fuzz targets are described
 in [`fuzz/README.md`](fuzz/README.md).
 
+## License
+
+VOLE-ARC is available under either the [Apache License, Version 2.0](LICENSE-APACHE)
+or the [MIT License](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in VOLE-ARC is licensed under those terms without additional
+conditions.
+
 [arc-crypto]: https://datatracker.ietf.org/doc/draft-ietf-privacypass-arc-crypto/
 [arc-protocol]: https://datatracker.ietf.org/doc/draft-ietf-privacypass-arc-protocol/
 [vole-act]: https://github.com/SamuelSchlesinger/vole-act
